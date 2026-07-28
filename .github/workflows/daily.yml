@@ -1,13 +1,14 @@
 name: arXiv hep-th Daily Digest
 
 on:
+  schedule:
+    - cron: '3 1 * * *'   # 北京时间每天 09:03 自动运行
   workflow_dispatch:
     inputs:
       date:
         description: 'Override date (YYYY-MM-DD). Leave empty for yesterday.'
         required: false
         default: ''
-
 jobs:
   digest:
     runs-on: ubuntu-latest
