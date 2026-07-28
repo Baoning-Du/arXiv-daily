@@ -1,0 +1,109 @@
+name: arXiv hep-th Daily Digest
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Override date (YYYY-MM-DD). Leave empty for yesterday.'
+        required: false
+        default: ''
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install openai
+
+      # The unified pipeline: fetch → translate → build all in Python
+      - name: Run digest pipeline
+        id: digest
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run:
+          python scripts/run.py --date "${{ github.event.inputs.date }}" 2>&1
+
+      # Deploy to GitHub Pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./outputs-public
+      - uses: actions/deploy-pages@v4
+
+      # Wait for Pages propagation then push notification
+      - name: Wait for Pages
+        run: sleep 30
+      - name: Send PushPlus notification
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/latest.html
+          HEP_TH: ${{ steps.digest.outputs.hep_th }}
+          DISPLAY: ${{ steps.digest.outputs.display }}
+        run: |
+          python << 'PYEOF'
+          import json, os, subprocess
+
+          # Read from workflow outputs (reliable, no file dependency)
+          summary = {
+              'hep-th': int(os.environ.get('HEP_TH', '0')),
+          }
+          date_display = os.environ.get('DISPLAY', '未知')
+
+          cats = [
+              ('\u269b\ufe0f', '#7c3aed', 'hep-th-latest.html'),
+          ]
+          cat_names = ['\u9ad8\u80fd\u7406\u8bba\u7269\u7406']
+          cat_keys = ['hep-th']
+
+          base = os.environ['PAGE_URL']
+          lines = ['<h3>\U0001f4f0 arXiv Daily | %s</h3>' % date_display]
+          lines.append('<p><a href="%s">\U0001f517 \u67e5\u770b\u62a5\u544a</a></p><hr>' % base)
+
+          for i, (emoji, color, page) in enumerate(cats):
+              cat = cat_keys[i]
+              count = summary.get(cat, 0)
+              name = cat_names[i]
+              url = base.replace('latest.html', page)
+              if count > 0:
+                  lines.append('<p style="font-size:16px;margin:8px 0">'
+                      '<a href="%s" style="color:%s;text-decoration:none;font-weight:600">'
+                      '%s %s(%s) %d \u7bc7</a></p>' % (url, color, emoji, name, cat, count))
+              else:
+                  lines.append('<p style="font-size:16px;margin:8px 0;color:#9ca3af">'
+                      '%s %s(%s)\u6ca1\u66f4\u65b0</p>' % (emoji, name, cat))
+
+          lines.append('<hr><p style="color:#999;font-size:12px">'
+              '\u6bcf\u65e5 12:00 \u81ea\u52a8\u63a8\u9001 &middot; '
+              '<a href="%s">\u67e5\u770b\u62a5\u544a</a><br>'
+              '\U0001f4a1 \u9875\u9762\u53ef\u80fd\u9700\u8981 1 \u5206\u949f\u5237\u65b0</p>' % base)
+
+          content = ''.join(lines)
+          title = 'arXiv Daily | %s' % date_display
+          token = os.environ['PUSHPLUS_TOKEN']
+
+          for topic in [None]:
+              body = {'token': token, 'title': title, 'content': content, 'template': 'html'}
+              if topic: body['topic'] = topic
+              subprocess.run(['curl', '-s', '-X', 'POST', 'https://www.pushplus.plus/send',
+                  '-H', 'Content-Type: application/json', '-d', json.dumps(body)], check=False)
+          print('PushPlus sent.')
+          PYEOF
+
+      - name: No papers notification
+        if: failure()
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          MSG="arXiv Daily: pipeline failed"
+          curl -s -X POST "https://www.pushplus.plus/send" \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"arXiv Daily\",\"content\":\"${MSG}\"}"
